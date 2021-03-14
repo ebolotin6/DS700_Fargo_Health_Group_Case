@@ -1,0 +1,185 @@
+# ---------- Pre-imputation analysis ---------- #
+
+  # import our dataset for imputation
+  data <- read.csv("dataset_for_impute.csv", header=TRUE, sep=",")
+
+  # find out how many NAs we have as percentage of all rows, for every variable
+  pMiss <- function(x){sum(is.na(x))/length(x)*100}
+  apply(data,2,pMiss)
+
+  # load up VIM to get a different view of missing data (by %)
+  library(VIM)
+  aggr_plot <- aggr(data, col=c('navyblue','red'), numbers=TRUE, sortVars=TRUE, labels=names(data), ylab=c("Histogram of missing data","Pattern"))
+
+# ---------- Imputation with MICE ---------- #
+
+  # load up mice
+  library(mice)
+  
+  # Get a better sense of missing data
+  md.pattern(data)  
+  
+  # impute the data
+  imputed_data <- mice(data, m=10, maxit=10, seed=500, print=F) # default method is predictive mean matching
+  
+  # fit imputed dataset, pool the fitted dataset, review summary info
+  mice_fit <- with(imputed_data, lm(Incoming.Examinations ~ Year + Month)) # fit a linear model to the imputed data 
+  summary(mice_fit$analyses[[1]]) # review summary of linear model for imputation 1
+  summary(mice_fit$analyses[[2]]) # review summary of linear model for imputation 2
+  summary(mice_fit$analyses[[3]]) # review summary of linear model for imputation 2
+  mice_pooled_fit <- pool(mice_fit) # pool the fitted models for all imputed datasets to come up with overall regression
+  pool.r.squared(mice_fit, adjusted = TRUE) # adjusted R squared 
+  summary(mice_pooled_fit) # summarize pooled linear model
+  
+  completedDataMice <- complete(imputed_data) # select first completed dataset
+  completedDataMice
+  write.csv(completedDataMice, "cleaned_dataset.csv", row.names=F)
+  
+  # compare the imputed data versus original data
+  xyplot(imputed_data, Incoming.Examinations ~ Year, pch=18,cex=2) # blue points are observed, red are imputed. The overlap tells us that the imputed values are plausible
+  densityplot(imputed_data, n=96) # Density plot of the imputed dataset (96 observations)
+  stripplot(imputed_data, pch = 20, cex = 1.2) # Distributions of the imputed values for each variable by imputed dataset
+  
+  # Plot lm and loess model against our imputed dataset (set 1)
+  library(ggplot2)
+  ggplot(completedDataMice, aes(x = Year, y = Incoming.Examinations)) + 
+    geom_point() +
+    geom_smooth(method="loess", aes(colour="Loess")) +
+    geom_smooth(method="lm", aes(colour="Linear")) +
+    ggtitle("Plot of Cleaned Data and Regression") +
+    scale_colour_manual(name="Model", values=c("blue","red"))
+
+# ---------- Imputation with AMELIA ---------- #
+
+  # load up Amelia and import our dataset
+  library(Amelia)
+  data <- read.csv("dataset_for_impute.csv", header=TRUE, sep=",")
+  
+  # run imputation
+  amelia_imp <- amelia(data, m=10, parallel = "multicore", ts="Year", p2s=0)
+  # write.amelia(obj=amelia_imp, file.stem = "outdata") # save to output before converting to data.frame
+  
+  amelia_imp <- amelia_imp$imputations 
+  amelia_ds <- do.call(rbind.data.frame, amelia_imp) # convert list to dataframe
+  amelia_ds <- round(amelia_ds[,], 0) # round values
+  
+  # Evaluate the distributions of Amelia imputations
+  ggplot(amelia_imp[[1]]) +
+    geom_density(aes(x=amelia_imp[[1]]$Incoming.Examinations)) + 
+    geom_density(aes(x=amelia_imp[[2]]$Incoming.Examinations)) + 
+    geom_density(aes(x=amelia_imp[[3]]$Incoming.Examinations)) +
+    geom_density(aes(x=amelia_imp[[4]]$Incoming.Examinations)) + 
+    geom_density(aes(x=amelia_imp[[5]]$Incoming.Examinations)) + 
+    geom_density(aes(x=amelia_imp[[6]]$Incoming.Examinations)) +
+    geom_density(aes(x=amelia_imp[[7]]$Incoming.Examinations)) + 
+    geom_density(aes(x=amelia_imp[[8]]$Incoming.Examinations)) + 
+    geom_density(aes(x=amelia_imp[[9]]$Incoming.Examinations)) +
+    geom_density(aes(x=amelia_imp[[10]]$Incoming.Examinations)) +
+    geom_density(aes(x=data$Incoming.Examinations, col="Observed")) +
+    scale_colour_manual(name="Model", values=c("red")) + 
+    labs(title="Amelia Density Plot", x="Incoming Exams")
+    
+  # plot observations
+  plot(amelia_ds$Incoming.Examinations ~ amelia_ds$Year, ylim=c(0,8000))
+  
+  # fit regression on Amelia imputations, then analyze regression, then plot regression
+  # amelia_fit_test <- with(amelia_imp[[1]], lm(amelia_imp[[1]]$Incoming.Examinations ~ amelia_imp[[1]]$Year + amelia_imp[[1]]$Month)) # run a linear fit the first imputed Amelia dataset
+  amelia_fit <- with(amelia_ds, lm(amelia_ds$Incoming.Examinations ~ amelia_ds$Year + amelia_ds$Month)) # 
+  summary(amelia_fit)
+  plot(amelia_fit)
+  
+# ---------- Forecasting with ARIMA (with MICE imputed dataset) ---------- #
+
+  library(forecast)
+  library(tseries)
+  
+  # Step 1: review time series and ensure that the time series is stationary
+  ts = ts(completedDataMice$Incoming.Examinations, start=c(2006, 1), end=c(2013,12), frequency=12) # create time series
+  plot(ts, xlab="Time", ylab="Incoming Examinations") # plot the time series
+  
+  components.ts = decompose(ts) # decompose the time series to understand the prevalence of three componenets: trend, seasonality, and error/irregularity
+  plot(components.ts) # we see that the data is not stationary
+  plot(stl(log(ts), s.window="period")) # another way to decompose using seasonal decomposition by loess smoothing
+  acf(ts) # autocorrelation function shows data is not stationary. Correlates set of observations at current time to set of observations at k periods earlier.
+  adf.test(ts) # run ADF test to confirm our hypothesis that data is not stationary 
+  
+  ndiffs(ts) # estimate the number of differences required to make a given time series stationary
+  diff_ts <- diff(ts, differences=2) # differentiate the data to make it stationary. We differentiate it twice to remove what appears to be a quadratic trend.
+  plot(diff_ts) # take a look at the differentiated data
+  adf.test(diff_ts) # run ADF to confirm data is now stationary
+  
+  # Step 2: identify reasonable model or models (possible values of p and q)
+  Acf(diff_ts) # review the ACF chart of the differenced time series. This plots the AC at various lags for the stationary/differenced time series.
+  Pacf(diff_ts) # correlation between an observation at current period and an observation at k periods earlier with observations between removed.
+ 
+  # Step 3: fit the model
+  fit <- Arima(ts, order=c(7,2,6)) # (p, d, q). d = 2 for nonseasonal differences applied. The lag at which the PACF cuts off is the indicated number of AR terms (p). The lag at which the ACF cuts off is the indicated number of MA terms (q).
+  fitauto <- auto.arima(ts) # Automated forecasting using an ARIMA model
+  summary(fit) # lower S^2, meaning points are closer to the line
+  summary(fitauto) 
+  cor(fitted(fit),ts)^2 # correlation of custom ARIMA fitted values to actual values
+  cor(fitted(fitauto),ts)^2 # correlation of custom ARIMA fitted values to actual values
+  
+  # Step 4: evaluate the model's fit, accuracy and residuals
+  # checking distribution & Ljung-Box for ARIMA
+  qqnorm(fit$residuals) # chart a Q-Q plot to test if the data is normally distributed
+  qqline(fit$residuals) # add line
+  Box.test(fit$residuals, type="Ljung-Box") # the results of this test are not significant, suggesting that the autocorrelations don't differ from zero.
+  
+  # checking distribution & Ljung-Box for auto ARIMA
+  qqnorm(fitauto$residuals)
+  qqline(fitauto$residuals)
+  Box.test(fitauto$residuals, type="Ljung-Box") # lowest chi-square suggesting better fit, and highest p-value suggesting low AC and nonsignificance. But this is due to mean error.
+  
+  # checking accuracy
+  accuracy(fit) # check accuracy for ARIMA fit.
+  accuracy(fitauto) # check accuracy for ARIMA auto fit
+  
+  # checking residuals
+  summary(residuals(fit))
+  summary(residuals(fitauto))
+  boxplot(residuals(fit))
+  boxplot(residuals(fitauto))
+  plot(residuals(fit))
+  plot(residuals(fitauto))
+
+  
+  # compare ARIMA models to time series
+  plot(ts)
+  lines(fitted(fit), col="green", lwd="4")
+  lines(fitted(fitauto), col="red", lwd="2")
+  
+  # Step 5: make forecasts and show predictions
+  forecast_arima <- forecast(fit, h=12) # create forecast for custom ARIMA model
+  forecast_arimaauto <- forecast(fitauto, h=12) # create forecast for auto ARIMA model
+  plot(forecast_arima) # plot custom ARIMA forecast
+  plot(forecast_arimaauto) # plot  auto generated forecast
+  forecast_arima # show forecasted incoming exams for next 12 months using custom ARIMA model
+  forecast_arimaauto # show forecasted incoming exams for next 12 months using the auto ARIMA model
+  
+  # ---------- Forecasting with Holt's (with MICE imputed dataset) ---------- #
+
+  library(forecast)
+  library(tseries)
+  
+  ts = ts(completedDataMice$Incoming.Examinations, start=c(2006, 1), end=c(2013,12), frequency=12) 
+  fitholts_m <- ets(ts, model="MMN") # Holt's approach but with multiplicative error and multiplicative trend.
+  fitholts_a <- ets(ts, model="AAN") # Holt's model (additive)
+  accuracy(fitholts_m) # check Holt's multiplicative accuracy.
+  accuracy(fitholts_a) # check Holt's additive model accuracy
+  forecast_m <- forecast(fitholts_m, 12) # create Holts multiplicative forecast
+  forecast_a <- forecast(fitholts_a, 12) # create Holts additive forecast for comparison
+  plot(forecast_m, main="(Holt's Multiplicative) Forecast for Incoming Examinations", ylab="Inc. Exams", xlab="Months", flty=2) # plot Holts multiplicative forecast
+  plot(forecast_a, main="(Holt's Additive) Forecast for Incoming Examinations", ylab="Inc. Exams", xlab="Months", flty=2) # plot Holts forecast
+  forecast_m # show forecasted incoming exams for next 12 months by Holts_m model
+  forecast_a # show forecasted incoming exams for next 12 months by Holts_a model
+  
+  # check residuals
+  qqnorm(fitholts_m$residuals)
+  qqline(fitholts_m$residuals)
+  qqnorm(fitholts_a$residuals)
+  qqline(fitholts_a$residuals)
+  summary(fitholts_m$residuals)
+  summary(fitholts_a$residuals)
+  
+  
